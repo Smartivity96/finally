@@ -22,7 +22,7 @@ Use code like these examples in order to call OpenAI.
 
 ```python
 from litellm import completion
-MODEL = "openai/gpt-5-mini"
+MODEL = "openai/gpt-6.1-sol"
 ```
 
 ### Code to call OpenAI for a text response

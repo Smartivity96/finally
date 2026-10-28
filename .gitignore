@@ -205,3 +205,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# FinAlly runtime / build artifacts
+db/*.db
+db/*.db-*
+!db/.gitkeep
+backend/static/
+frontend/node_modules/
+frontend/.next/
+frontend/out/

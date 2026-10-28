@@ -281,7 +281,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 ## 9. LLM Integration
 
-When writing code to make calls to LLMs, use the openai-inference skill to use LiteLLM with the OpenAI API and the `openai/gpt-5-mini` model. Structured Outputs should be used to interpret the results.
+When writing code to make calls to LLMs, use the openai-inference skill to use LiteLLM with the OpenAI API and the `openai/gpt-6.1-sol` model. Structured Outputs should be used to interpret the results.
 
 There is an OPENAI_API_KEY in the .env file in the project root.
 
