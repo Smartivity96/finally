@@ -66,7 +66,7 @@ The user runs a single Docker command (or a provided start script). A browser op
 - **Backend**: FastAPI (Python), managed as a `uv` project
 - **Database**: SQLite, single file at `db/finally.db`, volume-mounted for persistence
 - **Real-time data**: Server-Sent Events (SSE) — simpler than WebSockets, one-way server→client push, works everywhere
-- **AI integration**: LiteLLM → OpenRouter (Cerebras for fast inference), with structured outputs for trade execution
+- **AI integration**: LiteLLM → OpenAI, with structured outputs for trade execution
 - **Market data**: Environment-variable driven — simulator by default, real data via Massive API if key provided
 
 ### Why These Choices
@@ -121,8 +121,8 @@ finally/
 ## 5. Environment Variables
 
 ```bash
-# Required: OpenRouter API key for LLM chat functionality
-OPENROUTER_API_KEY=your-openrouter-api-key-here
+# Required: OpenAI API key for LLM chat functionality
+OPENAI_API_KEY=your-openai-api-key-here
 
 # Optional: Massive (Polygon.io) API key for real market data
 # If not set, the built-in market simulator is used (recommended for most users)
@@ -281,9 +281,9 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 ## 9. LLM Integration
 
-When writing code to make calls to LLMs, use cerebras-inference skill to use LiteLLM via OpenRouter to the `openrouter/openai/gpt-oss-120b` model with Cerebras as the inference provider. Structured Outputs should be used to interpret the results.
+When writing code to make calls to LLMs, use the openai-inference skill to use LiteLLM with the OpenAI API and the `openai/gpt-5-mini` model. Structured Outputs should be used to interpret the results.
 
-There is an OPENROUTER_API_KEY in the .env file in the project root.
+There is an OPENAI_API_KEY in the .env file in the project root.
 
 ### How It Works
 
@@ -292,11 +292,11 @@ When the user sends a chat message, the backend:
 1. Loads the user's current portfolio context (cash, positions with P&L, watchlist with live prices, total portfolio value)
 2. Loads recent conversation history from the `chat_messages` table
 3. Constructs a prompt with a system message, portfolio context, conversation history, and the user's new message
-4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
+4. Calls the LLM via LiteLLM → OpenAI, requesting structured output, using the openai-inference skill
 5. Parses the complete structured JSON response
 6. Auto-executes any trades or watchlist changes specified in the response
 7. Stores the message and executed actions in `chat_messages`
-8. Returns the complete JSON response to the frontend (no token-by-token streaming — Cerebras inference is fast enough that a loading indicator is sufficient)
+8. Returns the complete JSON response to the frontend (no token-by-token streaming — the response is fast enough that a loading indicator is sufficient)
 
 ### Structured Output Schema
 
@@ -339,7 +339,7 @@ The LLM should be prompted as "FinAlly, an AI trading assistant" with instructio
 
 ### LLM Mock Mode
 
-When `LLM_MOCK=true`, the backend returns deterministic mock responses instead of calling OpenRouter. This enables:
+When `LLM_MOCK=true`, the backend returns deterministic mock responses instead of calling OpenAI. This enables:
 - Fast, free, reproducible E2E tests
 - Development without an API key
 - CI/CD pipelines
@@ -454,3 +454,55 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Review: Questions, Clarifications and Simplifications
+
+*Added by doc review. Each item states the gap and a suggested default so agents can proceed without blocking. Resolve or delete items as decisions are made.*
+
+### 13.1 Inconsistencies with the existing code / repo
+
+1. **SSE event format differs from Section 6.** The built endpoint (`backend/app/market/stream.py`) sends **one event per tick containing all tickers** as a dict: `data: {"AAPL": {...}, "GOOGL": {...}}`, and only when the cache version changes. Section 6 reads as one event per ticker. *Suggestion:* update Section 6 to document the actual payload (fields from `PriceUpdate.to_dict()`) so the frontend agent codes against the real contract.
+2. **Timestamp format.** The price cache uses Unix float timestamps; the database schema uses ISO strings. *Suggestion:* state explicitly: SSE = Unix seconds (float), DB/REST = ISO 8601 UTC.
+3. **Skill name.** Section 9 refers to the "openai-inference skill"; the skill in `.claude/skills/` is named `openai`. Align the name.
+4. **Backend layout.** Section 4 places schema/seed in `backend/db/`, but the existing code lives in the `backend/app/` package. *Suggestion:* use `backend/app/db/` so everything is importable from `app`.
+5. **`users_profile` has no `user_id` column**, contradicting "All tables include a `user_id` column". Its `id` plays that role; say so explicitly.
+
+### 13.2 Open questions (with suggested defaults)
+
+1. **"Daily change %" in the watchlist.** There is no daily open/previous close in the simulator, and `PriceUpdate.change_percent` is tick-to-tick. What is the reference price? *Suggested default:* change vs. the first price seen this session (seed price for the simulator; previous close from Massive if available).
+2. **Which tickers are priced?** If a user removes a ticker from the watchlist while holding a position, the portfolio can no longer be valued. *Suggested default:* the tracked set = watchlist ∪ tickers with open positions.
+3. **Adding unknown/invalid tickers.** The simulator can price any string; Massive will reject unknown symbols. *Suggested default:* uppercase and validate format (1-5 letters); with Massive, reject if the first poll returns no data; with the simulator, assign a default seed price (e.g. $100) and default volatility.
+4. **Trading a ticker that has no price yet** (not in the cache). *Suggested default:* reject with a clear error ("add to watchlist first"), or auto-add to the watchlist and reject until the first price arrives. Pick one.
+5. **Fractional quantities.** Minimum quantity? Rounding? *Suggested default:* quantity > 0, rounded to 4 decimals; money rounded to cents for display only. When a sell brings quantity to ~0 (< 1e-6), delete the position row.
+6. **API response shapes and errors** are not specified for `/api/portfolio`, `/api/portfolio/trade`, `/api/watchlist` and `/api/chat`. *Suggestion:* add example JSON for each, and a single error convention (e.g. HTTP 400 with `{"error": "Insufficient cash"}`). This is the main contract between the frontend and backend agents and is worth writing down before parallel work starts.
+7. **Chat response shape to the frontend.** Suggest: `{message, trades: [{ticker, side, quantity, price, status, error?}], watchlist_changes: [{ticker, action, status, error?}]}`, so inline confirmations and failures render from the same data.
+8. **Chat action order.** If one response both adds a ticker and buys it, execute watchlist changes first, then trades.
+9. **Conversation history length.** *Suggested default:* last 20 messages sent to the LLM.
+10. **LLM failure handling** (timeout, invalid JSON, missing API key). *Suggested default:* return HTTP 200 with a friendly assistant message and no actions; never execute partial/unparsed actions.
+11. **Mock LLM behaviour.** E2E tests expect "trade execution appears inline", so the mock must produce trades deterministically. *Suggested default:* simple keyword rules, e.g. message containing "buy" → buy 1 AAPL; otherwise a fixed text reply with no actions.
+12. **Header total value "updating live".** Computed where? *Suggested default:* frontend computes `cash + Σ(quantity × latest SSE price)` using positions from `/api/portfolio`; refetch portfolio after each trade/chat action.
+13. **Empty P&L chart on first launch.** *Suggested default:* record a snapshot at startup so the chart has a first point immediately.
+14. **Snapshot growth.** A snapshot every 30s is ~2,900 rows/day. Fine for SQLite, but should `/api/portfolio/history` cap/downsample (e.g. last 24h or last 500 points)?
+15. **Portfolio reset.** Is there a way to reset to $10,000 (useful for demos and tests)? *Suggested default:* out of scope; deleting the Docker volume resets everything.
+16. **`OPENAI_API_KEY` "Required".** It is not required when `LLM_MOCK=true`. Reword to "required unless LLM_MOCK=true".
+17. **Local (non-Docker) development.** Where does the DB live when running `uv run` locally, and how does the frontend dev server reach the API? *Suggested default:* `DB_PATH` env var defaulting to `<project_root>/db/finally.db`; Next.js dev server proxies `/api/*` to `localhost:8000` via rewrites (dev only; not used in the static export).
+18. **Trade atomicity.** Manual and chat trades can overlap. *Suggestion:* each trade (cash update + position upsert + trade insert + snapshot) runs in a single SQLite transaction.
+
+### 13.3 Technical notes
+
+1. **Recharts is SVG, not canvas.** Section 10 says "Canvas-based charting library preferred (Lightweight Charts or Recharts)". Only Lightweight Charts is canvas-based. See simplification 13.4.2.
+2. **Static file mount order.** In FastAPI, register `/api/*` routers before mounting the static export at `/`, otherwise the catch-all static mount can shadow API routes.
+3. **Heatmap colour metric.** Specify: colour by unrealized P&L % relative to avg cost, clamped to e.g. ±10% for the colour scale.
+4. **Connection indicator mapping.** Green = `EventSource.OPEN`, yellow = `CONNECTING` (retrying), red = `CLOSED` or no event received for N seconds.
+
+### 13.4 Opportunities to simplify
+
+1. **Write the API contract first.** A short `planning/API.md` with request/response examples for every endpoint removes most of the questions above and lets frontend and backend agents work in parallel.
+2. **One charting approach.** Use Lightweight Charts for the main chart and P&L chart; draw sparklines as a tiny inline SVG polyline (no library); build the treemap with a small squarified-layout function or Recharts `Treemap` only. Avoid pulling in two full chart libraries.
+3. **Drop `docker-compose.yml`.** The start/stop scripts already cover the single-container run; a second way to launch is extra surface to keep in sync.
+4. **Lighter E2E setup.** Instead of a Playwright container in `docker-compose.test.yml`, run Playwright locally against the container started by `start_mac.sh`. Keep the compose-based setup as a stretch goal for CI.
+5. **Defer Windows scripts** until the macOS path works end to end; they are thin wrappers and easy to add last.
+6. **Trim the unit-test list.** Market data is already covered (73 tests). For the rest, focus on trade execution/P&L math, chat parsing + action execution, and route status codes; frontend unit tests can be limited to calculations (P&L, portfolio value) rather than rendering.
+7. **Skip `watchlist.id` / `positions.id` UUIDs** if desired: the `(user_id, ticker)` unique pair is a natural primary key. Minor, but fewer moving parts.
